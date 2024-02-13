@@ -2,36 +2,97 @@ const path = require("path");
 const readline = require("readline");
 const webcam = require("node-webcam");
 const fs = require("fs");
+const mqtt = require("mqtt");
 
+console.log("Starting up");
+
+// Read the config file
+console.log("Loading Configuration");
 const configFilePath = "config.json";
 const config = JSON.parse(fs.readFileSync(configFilePath, "utf-8"));
-const captureFolder = path.join(__dirname, "images", config.project_name);
 
-  // Start a counter to track the number of images we've taken
-  let imgCount = 0;
+// Define our MqttConnection, we will use this later
+let mqttConnection = null;
+
+// Connect to MQTT Server (if configured)
+if (config.mq_host !== "") {
+  (async function () { 
+    console.log("Connecting to MQTT Server: " + config.mq_host);
+
+    const connectUrl = `mqtt://${config.mq_host}:${config.mq_port}`
+    const connection = mqtt.connect(connectUrl, {
+      clientId: 'node-webcam-server',
+      clean: true,
+      connectTimeout: 4000,
+      username: config.mq_user,
+      password: config.mq_pass,
+      reconnectPeriod: 1000,
+    });
+    mqttConnection = connection;
+    
+    const topic = "/node-webcam-saver/mqtt";
+    
+    connection.on('connect', () => {
+      console.log('mqtt server connected');
+  
+      connection.subscribe(topic, () => {
+        console.log('subscribed to topic: ' + topic);
+      });
+    });
+  
+    connection.on('message', (topic, payload) => {
+      processIncomingMessage(topic, payload);
+    });
+  })();
+}
+else{
+  console.log("No MQTT Server Configured");
+}
+
+// Read the capture folder from the config file
+const captureFolder = path.join(__dirname, "images", config.project_name);
+console.log("Saving Images to: " + captureFolder);
+
+// Start a counter to track the number of images we've taken
+let imgCount = 0;
+let newProject = false;
 
 // Ensure the capture folder exists
 if (!fs.existsSync(captureFolder)) {
   fs.mkdirSync(captureFolder, { recursive: true });
+  newProject = true;
 }
 
 try {
-  console.log("Starting up");
+  
+  // Check if this is a new project or existing
+  console.log('Checking if this is a new project or existing');
+  if (newProject){
+    console.log('This is a new project, setting imgCount to zero');
+    imgCount = 0;
+    console.log("Next Image Number: " + imgCount);
+  }
+  else{
+    console.log("Checking last image number");
+    var imgCountValues = [];
+    fs.readdirSync(captureFolder).forEach((file) => {
+      var imgNum = file.split("_")[1];
+      imgCountValues.push(imgNum);
+    });
+  
+    let lastImgNum = imgCountValues[imgCountValues.length - 1];
+    imgCount = ++lastImgNum;
+    console.log("Next Image Number: " + imgCount);
+  }
 
-  console.log("Loading Configuration");
-  console.log('Saving Images to: ' + captureFolder);
+  // Verify the imgCount variable is properly set
+  console.log(imgCount);
+  if (imgCount === undefined || imgCount === null || isNaN(imgCount)){
+    console.log("imgCount is NaN, setting to zero");
+    imgCount = 0;
+  }
 
-  console.log('Checking last image number');
-  var imgCountValues = [];
-  fs.readdirSync(captureFolder).forEach(file => {
-    var imgNum = file.split('_')[1];
-    imgCountValues.push(imgNum);
-  });
-
-  let lastImgNum = imgCountValues[imgCountValues.length - 1]
-  imgCount = ++lastImgNum;
-  console.log('Next Image Number: ' + imgCount);
-
+  // Set up keypress events
   readline.emitKeypressEvents(process.stdin);
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
@@ -53,7 +114,8 @@ try {
   console.log("Starting Webcam");
   const cam = webcam.create(webcamOptions);
 
-  console.log("Start Listening for keypress");
+  console.log("Startup Complete");
+
   console.log('Press 0 to capture image, Press "q" to quit');
   process.stdin.on("keypress", (chunk, key) => {
     if (key && key.name == "q") {
@@ -61,22 +123,38 @@ try {
     }
 
     if (key && key.name === "0") {
+
       console.log("Capturing image");
+
       // Capture image from webcam
-      const timestamp = new Date().toISOString().replace(/:/g, "-").replace(/\./g, "-");
+      const timestamp = new Date()
+        .toISOString()
+        .replace(/:/g, "-")
+        .replace(/\./g, "-");
       const imageName = `timelapse_${imgCount}_${timestamp}.png`;
-  
+
       cam.capture(`${captureFolder}/${imageName}`, (err, data) => {
         if (err) {
           console.error("Error capturing image:", err);
         } else {
+          if (config.mq_host !== ''){
+            const topic = "node-webcam-saver/capture_result";
+            const message = `${imageName}`;
+            console.log('Publishing to MQTT Server:', topic, message);
+            mqttConnection.publish(topic, message);
+          }
           console.log("Image captured and saved successfully:", imageName);
         }
       });
       imgCount++;
     }
-
   });
 } catch (err) {
   console.error(err);
+}
+
+// Functions
+
+async function processIncomingMessage(topic, payload){
+  console.log('Received Message:', topic, payload.toString())
 }
